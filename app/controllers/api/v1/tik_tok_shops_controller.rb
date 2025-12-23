@@ -31,7 +31,7 @@ module Api
         end
 
         # Query the data
-        results = TikTokShop::ProductAnalyticsQuery.call(
+        results = TikTokShopServices::ProductAnalyticsQuery.call(
           tik_tok_shop_id: @tik_tok_shop.id,
           start_date: start_date_parsed,
           end_date: end_date_parsed,

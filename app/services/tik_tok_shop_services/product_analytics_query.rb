@@ -1,4 +1,4 @@
-module TikTokShop
+module TikTokShopServices
   class ProductAnalyticsQuery
     class << self
       def call(tik_tok_shop_id:, start_date:, end_date:, min_gmv_cents: nil)
@@ -19,13 +19,11 @@ module TikTokShop
     end
 
     def call
-      # Query snapshots for the date range
       snapshots = TikTokShopProductSnapshot
         .joins(:tik_tok_shop_product)
         .where(tik_tok_shop_id: @tik_tok_shop_id)
         .where(snapshot_date: @start_date..@end_date)
 
-      # Aggregate metrics by product
       aggregated = snapshots
         .group('tik_tok_shop_products.id')
         .select(
@@ -39,14 +37,12 @@ module TikTokShop
           'SUM(tik_tok_shop_product_snapshots.orders_count) as total_orders_count'
         )
 
-      # Apply GMV filter if provided
       if @min_gmv_cents
         min_gmv = @min_gmv_cents.to_d / 100.0
         aggregated = aggregated.having('SUM(tik_tok_shop_product_snapshots.gmv) >= ?', min_gmv)
       end
 
-      # Convert to array of hashes
-      results = aggregated.map do |row|
+      aggregated.map do |row|
         {
           external_id: row.external_id,
           title: row.title,
@@ -57,9 +53,8 @@ module TikTokShop
           orders_count: row.total_orders_count.to_i
         }
       end
-
-      results
     end
   end
 end
+
 

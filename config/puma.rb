@@ -6,9 +6,11 @@ port ENV.fetch("PORT") { 3000 }
 environment ENV.fetch("RAILS_ENV") { "development" }
 pidfile ENV.fetch("PIDFILE") { "tmp/pids/server.pid" }
 
-workers ENV.fetch("WEB_CONCURRENCY") { 2 }
+# NOTE: Puma clustered workers are not supported on this Ruby/Windows platform.
+# Run in single-process mode instead.
+# workers ENV.fetch("WEB_CONCURRENCY") { 2 }
 
-preload_app!
+# preload_app!
 
 plugin :tmp_restart
 

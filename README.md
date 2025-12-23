@@ -170,7 +170,7 @@ To sync product analytics for a date range:
 
 ```ruby
 # In Rails console or a worker
-TikTokShop::SyncProductAnalytics.call(
+TikTokShopServices::SyncProductAnalytics.call(
   tik_tok_shop_id: 1,
   start_date: Date.parse('2025-11-01'),
   end_date: Date.parse('2025-11-30')

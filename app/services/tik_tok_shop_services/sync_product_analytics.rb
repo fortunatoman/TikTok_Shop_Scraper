@@ -1,4 +1,4 @@
-module TikTokShop
+module TikTokShopServices
   class SyncProductAnalytics
     class << self
       def call(tik_tok_shop_id:, start_date:, end_date:)
@@ -16,7 +16,6 @@ module TikTokShop
     def call
       Rails.logger.info("Starting sync for shop #{@tik_tok_shop_id} from #{@start_date} to #{@end_date}")
 
-      # Process each day in the date range
       (@start_date..@end_date).each do |date|
         sync_date(date)
       end
@@ -40,41 +39,44 @@ module TikTokShop
 
       while has_more
         response = fetch_page(date, page_no, page_size)
-        
-        # Handle different response structures
-        if response.nil? || response['status_code'] != 0
-          Rails.logger.warn("Failed to fetch page #{page_no} for date #{date}: #{response&.dig('status_msg') || 'Unknown error'}")
+
+        if response.nil?
+          Rails.logger.warn("Failed to fetch page #{page_no} for date #{date}: response is nil")
           has_more = false
           break
         end
 
-        # Extract products from response
-        # The response structure may vary - adjust based on actual API response
+        if response['status_code'] && response['status_code'] != 0
+          Rails.logger.warn(
+            "Failed to fetch page #{page_no} for date #{date}: " \
+            "status_code=#{response['status_code']} status_msg=#{response['status_msg']}"
+          )
+          has_more = false
+          break
+        end
+
         products_data = extract_products_data(response)
-        
+
         if products_data.empty?
           has_more = false
           break
         end
 
-        # Upsert products and snapshots
         products_data.each do |product_data|
           upsert_product_and_snapshot(date, product_data)
         end
 
-        # Check if there are more pages
-        # Adjust based on actual pagination structure in response
-        pagination_info = response.dig('data', 'pagination') || 
-                         response.dig('pagination') ||
-                         {}
-        
-        total_pages = pagination_info['total_page'] || 
-                      pagination_info['total_pages'] || 
+        pagination_info = response.dig('data', 'pagination') ||
+                          response.dig('pagination') ||
+                          {}
+
+        total_pages = pagination_info['total_page'] ||
+                      pagination_info['total_pages'] ||
                       1
-        current_page = pagination_info['page'] || 
-                       pagination_info['current_page'] || 
+        current_page = pagination_info['page'] ||
+                       pagination_info['current_page'] ||
                        page_no
-        has_next = pagination_info['has_next'] || 
+        has_next = pagination_info['has_next'] ||
                    pagination_info['has_more'] ||
                    false
 
@@ -84,7 +86,6 @@ module TikTokShop
           has_more = false
         end
 
-        # Safety check to prevent infinite loops
         break if page_no > 100
       end
     end
@@ -107,15 +108,12 @@ module TikTokShop
     end
 
     def extract_products_data(response)
-      # The response structure may vary, but typically contains a list of products
-      # Adjust based on actual API response structure
       data = response['data'] || response
-      
+
       if data.is_a?(Hash)
-        # Try different possible keys
-        products = data['product_list'] || 
-                   data['products'] || 
-                   data['list'] || 
+        products = data['product_list'] ||
+                   data['products'] ||
+                   data['list'] ||
                    data['items'] ||
                    []
       elsif data.is_a?(Array)
@@ -124,9 +122,7 @@ module TikTokShop
         products = []
       end
 
-      # If products is still empty, try to find it in nested structures
       if products.empty? && data.is_a?(Hash)
-        # Look for nested data structures
         data.each_value do |value|
           if value.is_a?(Array) && value.any? { |item| item.is_a?(Hash) && (item.key?('product_id') || item.key?('id')) }
             products = value
@@ -139,10 +135,8 @@ module TikTokShop
     end
 
     def upsert_product_and_snapshot(date, product_data)
-      # Extract product attributes
-      # Try multiple possible keys for product ID
-      external_id = product_data['product_id'] || 
-                    product_data['id'] || 
+      external_id = product_data['product_id'] ||
+                    product_data['id'] ||
                     product_data.dig('product_info', 'product_id') ||
                     product_data.dig('product_info', 'id') ||
                     product_data.dig('base_info', 'product_id') ||
@@ -150,34 +144,32 @@ module TikTokShop
 
       return unless external_id
 
-      # Extract product info - try multiple nested structures
-      product_info = product_data['product_info'] || 
-                     product_data['base_info'] || 
+      product_info = product_data['product_info'] ||
+                     product_data['base_info'] ||
                      product_data
-      
+
       product_attrs = {
         external_id: external_id.to_s,
-        title: product_info['title'] || 
-               product_info['product_name'] || 
+        title: product_info['title'] ||
+               product_info['product_name'] ||
                product_info['name'] ||
                product_data['title'] ||
                product_data['name'],
-        image_url: product_info['image_url'] || 
-                   product_info['image'] || 
+        image_url: product_info['image_url'] ||
+                   product_info['image'] ||
                    product_info.dig('image', 'url') ||
                    product_data['image_url'] ||
                    product_data.dig('image', 'url'),
-        status: product_info['status'] || 
-                product_data['status'] || 
+        status: product_info['status'] ||
+                product_data['status'] ||
                 'unknown',
-        stock: product_info['stock'] || 
+        stock: product_info['stock'] ||
                product_info['stock_quantity'] ||
-               product_data['stock'] || 
-               product_data['stock_quantity'] || 
+               product_data['stock'] ||
+               product_data['stock_quantity'] ||
                0
       }
 
-      # Upsert product
       product = TikTokShopProduct.find_or_initialize_by(
         tik_tok_shop_id: @tik_tok_shop_id,
         external_id: product_attrs[:external_id]
@@ -185,36 +177,34 @@ module TikTokShop
       product.assign_attributes(product_attrs)
       product.save!
 
-      # Extract metrics - try multiple possible structures
-      metrics = product_data['metrics'] || 
+      metrics = product_data['metrics'] ||
                 product_data['statistics'] ||
                 product_data['performance'] ||
                 product_data
-      
+
       snapshot_attrs = {
         tik_tok_shop_id: @tik_tok_shop_id,
         tik_tok_shop_product_id: product.id,
         snapshot_date: date,
-        gmv: parse_decimal(metrics['gmv'] || 
-                          metrics['gmv_amount'] || 
-                          metrics['total_gmv'] ||
-                          product_data['gmv'] ||
-                          0),
-        items_sold: parse_integer(metrics['items_sold'] || 
-                                  metrics['quantity'] || 
+        gmv: parse_decimal(metrics['gmv'] ||
+                           metrics['gmv_amount'] ||
+                           metrics['total_gmv'] ||
+                           product_data['gmv'] ||
+                           0),
+        items_sold: parse_integer(metrics['items_sold'] ||
+                                  metrics['quantity'] ||
                                   metrics['quantity_sold'] ||
                                   product_data['items_sold'] ||
                                   product_data['quantity'] ||
                                   0),
-        orders_count: parse_integer(metrics['orders_count'] || 
-                                   metrics['order_count'] ||
-                                   metrics['orders'] ||
-                                   product_data['orders_count'] ||
-                                   product_data['order_count'] ||
-                                   0)
+        orders_count: parse_integer(metrics['orders_count'] ||
+                                    metrics['order_count'] ||
+                                    metrics['orders'] ||
+                                    product_data['orders_count'] ||
+                                    product_data['order_count'] ||
+                                    0)
       }
 
-      # Upsert snapshot (idempotent)
       snapshot = TikTokShopProductSnapshot.find_or_initialize_by(
         tik_tok_shop_product_id: product.id,
         snapshot_date: date
@@ -251,3 +241,5 @@ module TikTokShop
     end
   end
 end
+
+
