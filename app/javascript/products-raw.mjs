@@ -178,17 +178,27 @@ export async function getProductsRaw({
         "user-agent": config.browser.userAgent,
         "cookie": cookie,
       },
+      timeout: 30000, // 30 second timeout
     });
 
     return response.data;
   } catch (error) {
-    return (
-      error?.response?.data ?? {
-        status_code: -2,
-        status_msg: "request_failed",
+    // If axios got a response with an error status code, return the response data
+    if (error.response) {
+      return error.response.data || {
+        status_code: error.response.status || -2,
+        status_msg: `HTTP ${error.response.status}`,
         error: error.message,
-      }
-    );
+      };
+    }
+    
+    // Network error or other axios error
+    return {
+      status_code: -2,
+      status_msg: "request_failed",
+      error: error.message,
+      error_type: error.code || "UNKNOWN",
+    };
   }
 }
 

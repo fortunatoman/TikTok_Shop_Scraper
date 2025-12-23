@@ -45,19 +45,41 @@ module TikTokShopServices
           has_more = false
           break
         end
-
-        if response['status_code'] && response['status_code'] != 0
+        
+        # TikTok API returns errors with 'code' and 'message' fields
+        if response['code'] && response['code'] != 0
+          error_msg = response['message'] || response['status_msg'] || 'Unknown error'
           Rails.logger.warn(
             "Failed to fetch page #{page_no} for date #{date}: " \
-            "status_code=#{response['status_code']} status_msg=#{response['status_msg']}"
+            "code=#{response['code']} message=#{error_msg}"
+          )
+          has_more = false
+          break
+        end
+        
+        # Also check for status_code format (if API returns it)
+        if response['status_code'] && response['status_code'] != 0
+          error_msg = response['status_msg'] || response['message'] || 'Unknown error'
+          Rails.logger.warn(
+            "Failed to fetch page #{page_no} for date #{date}: " \
+            "status_code=#{response['status_code']} status_msg=#{error_msg}"
           )
           has_more = false
           break
         end
 
+        # Log the response structure for debugging
+        if response.is_a?(Hash)
+          Rails.logger.info("API Response keys: #{response.keys.inspect}")
+          Rails.logger.info("API Response sample (first 1000 chars): #{response.to_json[0..1000]}")
+        end
+        
         products_data = extract_products_data(response)
+        Rails.logger.info("Extracted #{products_data.count} products from response")
 
         if products_data.empty?
+          response_structure = response.is_a?(Hash) ? response.keys.inspect : response.class.name
+          Rails.logger.warn("No products found in response for date #{date}, page #{page_no}. Response structure: #{response_structure}")
           has_more = false
           break
         end
@@ -108,65 +130,91 @@ module TikTokShopServices
     end
 
     def extract_products_data(response)
+      # TikTok API returns: { "code": 0, "message": "success", "data": { "items": [...] } }
+      Rails.logger.debug("Extracting products from response structure")
+      
       data = response['data'] || response
 
       if data.is_a?(Hash)
-        products = data['product_list'] ||
+        # TikTok API uses 'items' key for product list
+        products = data['items'] ||
+                   data['product_list'] ||
                    data['products'] ||
                    data['list'] ||
-                   data['items'] ||
+                   data['data'] ||  # Sometimes data is nested
                    []
+        
+        # Log what we found
+        if products.empty?
+          Rails.logger.debug("No products found in standard keys. Available keys: #{data.keys.inspect}")
+        end
       elsif data.is_a?(Array)
         products = data
       else
         products = []
       end
 
+      # If products is still empty, try to find it in nested structures
       if products.empty? && data.is_a?(Hash)
-        data.each_value do |value|
-          if value.is_a?(Array) && value.any? { |item| item.is_a?(Hash) && (item.key?('product_id') || item.key?('id')) }
+        # Look for nested data structures that contain arrays of objects with 'meta' key (TikTok structure)
+        data.each do |key, value|
+          if value.is_a?(Array) && value.any? { |item| item.is_a?(Hash) && (item.key?('meta') || item.key?('product_id') || item.key?('id')) }
+            Rails.logger.debug("Found products array in key: #{key}")
             products = value
             break
           end
         end
       end
 
+      Rails.logger.debug("Extracted #{products.count} products from response")
       products
     end
 
     def upsert_product_and_snapshot(date, product_data)
-      external_id = product_data['product_id'] ||
+      # TikTok API returns products with 'meta' and 'stats' keys
+      # meta contains: product_id, product_name, product_image, product_status, inventory_cnt
+      # stats contains: product_id, gmv, order_cnt, unit_sold_cnt, etc.
+      
+      meta = product_data['meta'] || {}
+      stats = product_data['stats'] || {}
+      
+      # Extract product ID from meta or stats
+      external_id = meta['product_id'] || stats['product_id'] ||
+                    product_data['product_id'] ||
                     product_data['id'] ||
+                    product_data['external_id'] ||
                     product_data.dig('product_info', 'product_id') ||
                     product_data.dig('product_info', 'id') ||
                     product_data.dig('base_info', 'product_id') ||
                     product_data.dig('base_info', 'id')
 
-      return unless external_id
+      unless external_id
+        Rails.logger.warn("Skipping product - no external_id found. Keys: #{product_data.keys.inspect}")
+        return
+      end
+      
+      Rails.logger.debug("Processing product with external_id: #{external_id}")
 
-      product_info = product_data['product_info'] ||
-                     product_data['base_info'] ||
-                     product_data
-
+      # Extract product attributes from meta (TikTok API structure)
       product_attrs = {
         external_id: external_id.to_s,
-        title: product_info['title'] ||
-               product_info['product_name'] ||
-               product_info['name'] ||
+        title: meta['product_name'] ||
+               meta['title'] ||
+               product_data['product_name'] ||
                product_data['title'] ||
                product_data['name'],
-        image_url: product_info['image_url'] ||
-                   product_info['image'] ||
-                   product_info.dig('image', 'url') ||
+        image_url: meta['product_image'] ||
+                   meta['image_url'] ||
+                   meta['image'] ||
+                   product_data['product_image'] ||
                    product_data['image_url'] ||
                    product_data.dig('image', 'url'),
-        status: product_info['status'] ||
-                product_data['status'] ||
-                'unknown',
-        stock: product_info['stock'] ||
-               product_info['stock_quantity'] ||
+        status: meta['product_status'] == 1 ? 'live' : (meta['product_status'] ? 'hidden' : 'unknown'),  # 1 = live, other = hidden
+        stock: meta['inventory_cnt'] ||
+               meta['stock'] ||
+               meta['stock_quantity'] ||
+               product_data['inventory_cnt'] ||
                product_data['stock'] ||
-               product_data['stock_quantity'] ||
                0
       }
 
@@ -177,32 +225,17 @@ module TikTokShopServices
       product.assign_attributes(product_attrs)
       product.save!
 
-      metrics = product_data['metrics'] ||
-                product_data['statistics'] ||
-                product_data['performance'] ||
-                product_data
-
+      # Extract metrics from stats (TikTok API structure)
+      # stats.gmv is an object: { "amount": "1962.29", "currency_code": "USD", ... }
+      gmv_amount = stats.dig('gmv', 'amount') || stats['gmv'] || stats['gmv_amount'] || 0
+      
       snapshot_attrs = {
         tik_tok_shop_id: @tik_tok_shop_id,
         tik_tok_shop_product_id: product.id,
         snapshot_date: date,
-        gmv: parse_decimal(metrics['gmv'] ||
-                           metrics['gmv_amount'] ||
-                           metrics['total_gmv'] ||
-                           product_data['gmv'] ||
-                           0),
-        items_sold: parse_integer(metrics['items_sold'] ||
-                                  metrics['quantity'] ||
-                                  metrics['quantity_sold'] ||
-                                  product_data['items_sold'] ||
-                                  product_data['quantity'] ||
-                                  0),
-        orders_count: parse_integer(metrics['orders_count'] ||
-                                    metrics['order_count'] ||
-                                    metrics['orders'] ||
-                                    product_data['orders_count'] ||
-                                    product_data['order_count'] ||
-                                    0)
+        gmv: parse_decimal(gmv_amount),
+        items_sold: parse_integer(stats['unit_sold_cnt'] || stats['items_sold'] || stats['quantity'] || 0),
+        orders_count: parse_integer(stats['order_cnt'] || stats['orders_count'] || stats['order_count'] || 0)
       }
 
       snapshot = TikTokShopProductSnapshot.find_or_initialize_by(

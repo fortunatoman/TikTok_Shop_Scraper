@@ -35,16 +35,29 @@ class SignParamsService
       stdin_data: input_data
     )
 
-    unless status.success?
-      Rails.logger.error("Node request failed: #{stderr}")
-      raise "Request failed: #{stderr}"
+    # Even if node exits with non-zero, we still try to parse stdout
+    # because the JS code now outputs errors as JSON to stdout
+    parsed_response = JSON.parse(stdout.strip)
+    
+    # Check if the response itself indicates an error
+    if parsed_response['error'] || parsed_response['status_code'] == -1
+      error_msg = parsed_response['status_msg'] || parsed_response['error'] || 'Unknown error'
+      Rails.logger.error("JavaScript fetcher error: #{error_msg}")
+      Rails.logger.error("stderr: #{stderr}") if stderr && !stderr.empty?
+      return parsed_response  # Return the error response so caller can handle it
     end
 
-    # Parse and return the response
-    JSON.parse(stdout.strip)
+    parsed_response
   rescue JSON::ParserError => e
-    Rails.logger.error("Failed to parse response: #{stdout}")
+    Rails.logger.error("Failed to parse JSON response: #{e.message}")
+    Rails.logger.error("stdout: #{stdout}")
+    Rails.logger.error("stderr: #{stderr}") if stderr && !stderr.empty?
     raise "Failed to parse response: #{e.message}"
+  rescue StandardError => e
+    Rails.logger.error("SignParamsService error: #{e.message}")
+    Rails.logger.error("stdout: #{stdout}")
+    Rails.logger.error("stderr: #{stderr}") if stderr && !stderr.empty?
+    raise
   end
 end
 
