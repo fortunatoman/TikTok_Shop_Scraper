@@ -147,9 +147,9 @@ export async function getProductsRaw({
     ["use_content_type_definition", 1],
   ];
 
-  // Generate msToken if not provided (simple random string for now)
-  // In production, this should be extracted from cookies or generated properly
-  const msToken = generateMsToken();
+  // Prefer msToken from cookie if present; fall back to a generated token.
+  const msTokenFromCookie = extractMsTokenFromCookie(cookie);
+  const msToken = msTokenFromCookie || generateMsToken();
   entries.push(["msToken", msToken]);
 
   const { signedUrl } = await signParamsStable({
@@ -183,12 +183,23 @@ export async function getProductsRaw({
     return response.data;
   } catch (error) {
     return (
-      error?.response?.data ?? { status_code: -2, status_msg: "request_failed", error: error.message }
+      error?.response?.data ?? {
+        status_code: -2,
+        status_msg: "request_failed",
+        error: error.message,
+      }
     );
   }
 }
 
-// Simple msToken generator (in production, extract from cookies or use proper generation)
+// Try to pull msToken from the raw cookie header
+function extractMsTokenFromCookie(cookie) {
+  if (!cookie) return null;
+  const match = cookie.match(/(?:^|;\s*)msToken=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+// Fallback msToken generator (best-effort). TikTok may still override / validate this.
 function generateMsToken() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   let result = "";
