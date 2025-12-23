@@ -11,6 +11,10 @@ gem 'rack-cors'
 gem 'tzinfo-data', platforms: [:mingw, :x64_mingw, :mswin, :jruby]
 
 group :development, :test do
+  gem 'dotenv-rails'
+end
+
+group :development, :test do
   # NOTE: Bundler warns that :mingw and :x64_mingw are deprecated; it's safe for now.
   # We can switch to :windows later if needed.
   gem 'byebug', platforms: [:mri, :mingw, :x64_mingw]
